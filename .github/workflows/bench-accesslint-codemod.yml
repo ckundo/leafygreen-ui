@@ -1,0 +1,130 @@
+name: Bench @accesslint/codemod
+
+on:
+  workflow_dispatch:
+    inputs:
+      codemod-version:
+        description: "Version of @accesslint/codemod to run"
+        default: "0.1.2"
+        type: string
+      jest-version:
+        description: "Version of @accesslint/jest to install after codemod"
+        default: "0.1.2"
+        type: string
+      iterations:
+        description: "How many times to run each variant"
+        default: "3"
+        type: string
+      test-scope:
+        description: "Jest testPathPattern for the benchmark subset"
+        default: "chat/.*\\.spec\\.tsx$"
+        type: string
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable corepack pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.26.0 --activate
+          pnpm -v
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace packages
+        run: pnpm build
+
+      - name: Collect jest-axe test files in scope
+        id: files
+        run: |
+          mapfile -t files < <(
+            find chat packages charts -name '*.spec.tsx' -not -path '*/node_modules/*' \
+              | xargs grep -l 'jest-axe\|toHaveNoViolations' 2>/dev/null \
+              | grep -E "${{ github.event.inputs.test-scope }}" || true
+          )
+          printf '%s\n' "${files[@]}" > /tmp/bench-files.txt
+          echo "count=${#files[@]}" >> $GITHUB_OUTPUT
+          echo "Found ${#files[@]} files in scope:"
+          cat /tmp/bench-files.txt
+
+      - name: Run baseline (jest-axe) — ${{ github.event.inputs.iterations }} iterations
+        id: baseline
+        run: |
+          ITERATIONS=${{ github.event.inputs.iterations }}
+          total=0
+          for i in $(seq 1 $ITERATIONS); do
+            start=$(date +%s%N)
+            xargs -a /tmp/bench-files.txt pnpm exec jest \
+              --config tools/test/config/jest.config.js \
+              --ci --silent --coverage=false
+            end=$(date +%s%N)
+            elapsed_ms=$(( (end - start) / 1000000 ))
+            echo "iter $i: ${elapsed_ms}ms"
+            total=$(( total + elapsed_ms ))
+          done
+          mean=$(( total / ITERATIONS ))
+          echo "mean_ms=$mean" >> $GITHUB_OUTPUT
+          echo "Baseline mean: ${mean}ms"
+
+      - name: Apply @accesslint/codemod
+        run: |
+          xargs -a /tmp/bench-files.txt npx -y @accesslint/codemod@${{ github.event.inputs.codemod-version }} jest-axe
+
+      - name: Install @accesslint/jest
+        run: pnpm add -D -w @accesslint/jest@${{ github.event.inputs.jest-version }}
+
+      - name: Run migrated (accesslint) — ${{ github.event.inputs.iterations }} iterations
+        id: after
+        run: |
+          ITERATIONS=${{ github.event.inputs.iterations }}
+          total=0
+          for i in $(seq 1 $ITERATIONS); do
+            start=$(date +%s%N)
+            xargs -a /tmp/bench-files.txt pnpm exec jest \
+              --config tools/test/config/jest.config.js \
+              --ci --silent --coverage=false
+            end=$(date +%s%N)
+            elapsed_ms=$(( (end - start) / 1000000 ))
+            echo "iter $i: ${elapsed_ms}ms"
+            total=$(( total + elapsed_ms ))
+          done
+          mean=$(( total / ITERATIONS ))
+          echo "mean_ms=$mean" >> $GITHUB_OUTPUT
+          echo "After mean: ${mean}ms"
+
+      - name: Publish comparison to job summary
+        if: always()
+        run: |
+          BASELINE=${{ steps.baseline.outputs.mean_ms }}
+          AFTER=${{ steps.after.outputs.mean_ms }}
+          FILES=${{ steps.files.outputs.count }}
+          if [ -n "$BASELINE" ] && [ -n "$AFTER" ] && [ "$BASELINE" -gt 0 ]; then
+            delta=$(( BASELINE - AFTER ))
+            pct=$(awk "BEGIN { printf \"%.1f\", ($delta / $BASELINE) * 100 }")
+          else
+            delta="n/a"; pct="n/a"
+          fi
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          # @accesslint/codemod benchmark — mongodb/leafygreen-ui
+
+          - **Codemod version:** \`@accesslint/codemod@${{ github.event.inputs.codemod-version }}\`
+          - **Jest package version:** \`@accesslint/jest@${{ github.event.inputs.jest-version }}\`
+          - **Iterations per variant:** ${{ github.event.inputs.iterations }}
+          - **Files in scope:** $FILES (pattern: \`${{ github.event.inputs.test-scope }}\`)
+
+          | variant  | mean wall-clock |
+          | -------- | --------------- |
+          | baseline (jest-axe)  | ${BASELINE} ms |
+          | after (@accesslint/jest) | ${AFTER} ms |
+          | **Δ**   | **${delta} ms (${pct}%)** |
+          EOF
