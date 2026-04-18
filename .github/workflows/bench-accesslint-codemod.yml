@@ -66,7 +66,9 @@ jobs:
             start=$(date +%s%N)
             xargs -a /tmp/bench-files.txt pnpm exec jest \
               --config tools/test/config/jest.config.js \
-              --ci --silent --coverage=false
+              --rootDir "$GITHUB_WORKSPACE" \
+              --ci --silent --coverage=false \
+              --passWithNoTests
             end=$(date +%s%N)
             elapsed_ms=$(( (end - start) / 1000000 ))
             echo "iter $i: ${elapsed_ms}ms"
@@ -92,7 +94,9 @@ jobs:
             start=$(date +%s%N)
             xargs -a /tmp/bench-files.txt pnpm exec jest \
               --config tools/test/config/jest.config.js \
-              --ci --silent --coverage=false
+              --rootDir "$GITHUB_WORKSPACE" \
+              --ci --silent --coverage=false \
+              --passWithNoTests
             end=$(date +%s%N)
             elapsed_ms=$(( (end - start) / 1000000 ))
             echo "iter $i: ${elapsed_ms}ms"
